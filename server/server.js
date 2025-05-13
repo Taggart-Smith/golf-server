@@ -27,6 +27,95 @@ client.connect()
 // JWT authentication middleware (optional for future use)
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey';
 
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer <token>
+
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403); // invalid token
+    req.user = user; // decoded payload
+    next();
+  });
+}
+
+app.post('/api/signup', async (req, res) => {
+  const { name, email, password } = req.body;
+
+  try {
+    // Check if user already exists
+    const existing = await client.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ message: 'User already exists' });
+    }
+
+    // Hash the password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Insert the user
+    const result = await client.query(
+      `INSERT INTO users (name, email, password) 
+       VALUES ($1, $2, $3) 
+       RETURNING id, name, email, created_at`,
+      [name, email, hashedPassword]
+    );
+
+    const user = result.rows[0];
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '1d' });
+
+    res.status(201).json({ user, token });
+  } catch (err) {
+    console.error('Signup error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    const result = await client.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = result.rows[0];
+
+    if (!user) return res.status(401).json({ message: 'Invalid email or password' });
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(401).json({ message: 'Invalid email or password' });
+
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '1d' });
+
+    res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        created_at: user.created_at,
+      },
+      token
+    });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.get('/api/profile', authenticateToken, async (req, res) => {
+  try {
+    const result = await client.query('SELECT id, name, email, created_at FROM users WHERE id = $1', [req.user.id]);
+    const user = result.rows[0];
+
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    res.json({ user });
+  } catch (err) {
+    console.error('Profile error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
 // GET /api/tee-times
 app.get('/api/tee-times', async (req, res) => {
   try {
